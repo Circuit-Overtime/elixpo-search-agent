@@ -949,7 +949,7 @@ def handle_search():
     return Response(markdown_output, mimetype='text/markdown', status=status_code)
 
 
-if __name__ == "__main__":
-    # Running in __main__ with debug=False is standard for production-like deployment
-    # Using 127.0.0.1 binds to localhost only
-    app.run(host="127.0.0.1", port=5000, debug=False)
+# if __name__ == "__main__":
+#     # Running in __main__ with debug=False is standard for production-like deployment
+#     # Using 127.0.0.1 binds to localhost only
+#     app.run(host="127.0.0.1", port=5000, debug=False)
