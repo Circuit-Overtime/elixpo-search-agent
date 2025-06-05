@@ -197,7 +197,7 @@
             resultsArea.innerHTML = marked.parse("### Loading results... Please wait a couple of mins!");
             submitButton.disabled = true;
 
-            fetch(`${LOCAL_SEARCH_URL}`, {
+            fetch(`${POLLINATIONS_SEARCH_URL}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
