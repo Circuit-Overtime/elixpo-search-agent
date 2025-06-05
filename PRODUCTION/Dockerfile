@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 5000
 ENV FLASK_APP=ai_search_agent_prod.py
 # CMD ["waitress-serve", "--host=10.42.0.56", "--port=5000", "ai_search_agent_prod:app", ">", "access.log", "2>", "error.log"]
-CMD ["waitress-serve", "--host=10.42.0.56", "--port=5000", "ai_search_agent_prod:app"]
+CMD ["waitress-serve", "--host=0.0.0.0", "--port=5000", "ai_search_agent_prod:app"]
