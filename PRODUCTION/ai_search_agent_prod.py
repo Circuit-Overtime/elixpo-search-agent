@@ -5,7 +5,10 @@ import re
 import time
 import sys
 from urllib.parse import urljoin, urlparse, parse_qs
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api.formatters import TextFormatter
+import xml.etree.ElementTree as ET
 from pytube import YouTube, exceptions
 from duckduckgo_search import DDGS
 from duckduckgo_search.exceptions import DuckDuckGoSearchException, TimeoutException, RatelimitException
@@ -38,6 +41,7 @@ REQUEST_RETRY_DELAY = 5
 MAX_REQUEST_RETRIES = 3
 MAX_DUCKDUCKGO_RETRIES = 5
 MAX_CONCURRENT_REQUESTS = 8
+MAX_TRANSCRIPT_WORD_COUNT = 500
 
 
 CLASSIFICATION_MODEL = os.getenv("CLASSIFICATION_MODEL", "openai-fast")
@@ -154,42 +158,46 @@ def get_youtube_video_id(url):
             if match:
                 return match.group(1)
     elif "youtu.be" in parsed_url.netloc:
-        if parsed_url.path and len(parsed_url.path) > 1:
-            return parsed_url.path[1:].split('/')[0].split('?')[0].split('#')[0]
+        path = parsed_url.path.lstrip('/')
+        if path:
+            video_id = path.split('/')[0].split('?')[0].split('#')[0]
+            video_id = video_id.split('&')[0]
+            return video_id
     return None
 
-def get_youtube_transcript(video_id, show_logs=get_youtube_transcript_show_log):
+def get_youtube_transcript(video_id, show_logs=True):
     if not video_id:
         conditional_print("Attempted to get transcript with no video ID.", show_logs)
         return None
 
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        transcript = None
+        # Try to get English transcript directly
         try:
-            transcript = transcript_list.find_transcript(['en'])
-            conditional_print(f"Found 'en' transcript for video ID: {video_id}", show_logs)
+            entries = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+            conditional_print(f"Found English ('en') transcript for video ID: {video_id}", show_logs)
         except NoTranscriptFound:
-             conditional_print(f"No 'en' transcript found, trying 'a.en' for video ID: {video_id}", show_logs)
-             try:
-                transcript = transcript_list.find_transcript(['a.en'])
-                conditional_print(f"Found 'a.en' transcript for video ID: {video_id}", show_logs)
-             except NoTranscriptFound:
-                conditional_print(f"No 'a.en' transcript found for video ID: {video_id}", show_logs)
+            conditional_print(f"No 'en' transcript found. Trying other available languages.", show_logs)
+            # Fetch list and get first available transcript
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            available = list(transcript_list._manually_created_transcripts.values()) + list(transcript_list._generated_transcripts.values())
+            if not available:
+                conditional_print(f"No transcripts found in any language for video ID: {video_id}", show_logs)
                 return None
+            transcript = available[0]
+            conditional_print(f"Using transcript in '{transcript.language_code}'", show_logs)
+            entries = transcript.fetch()
 
-        entries = transcript.fetch()
+        # Assemble full text from entries
+        if not entries:
+            raise ValueError("Transcript fetch returned no entries.")
         full_text = " ".join(entry['text'] for entry in entries)
-
         words = full_text.split()
         if len(words) > MAX_TRANSCRIPT_WORD_COUNT:
             return " ".join(words[:MAX_TRANSCRIPT_WORD_COUNT]) + "..."
-
         return full_text
 
     except NoTranscriptFound:
-        conditional_print(f"No transcript available at all for video ID: {video_id}", show_logs)
+        conditional_print(f"No transcript available for video ID: {video_id}", show_logs)
     except TranscriptsDisabled:
         conditional_print(f"Transcripts are disabled for video ID: {video_id}", show_logs)
     except Exception as e:
@@ -499,42 +507,41 @@ def perform_duckduckgo_text_search(query, max_results, retries=MAX_DUCKDUCKGO_RE
             valid_results = [r for r in search_results if r and isinstance(r.get('href'), str) and r['href'].strip()]
 
             if not valid_results:
-                 conditional_print(f"DDGS returned no valid results (empty or missing href) for query '{query}'.", show_logs)
-                 return []
+                conditional_print(f"DDGS returned no valid results (empty or missing href) for query '{query}'.", show_logs)
+                return []
 
             conditional_print(f"DDGS search successful for query '{query}'. Found {len(valid_results)} results.", show_logs)
             return valid_results
 
-        except DuckDuckGoSearchException as e:
-            conditional_print(f"DDGS search error during _search for '{query}': {type(e).__name__}: {e}", show_logs)
-            raise
-        except TimeoutException as e:
-            conditional_print(f"DDGS search timed out for '{query}': {type(e).__name__}: {e}", show_logs)
-            raise
-        except RatelimitException as e:
-            conditional_print(f"DDGS search rate limit exceeded for '{query}': {type(e).__name__}: {e}", show_logs)
-            raise
         except Exception as e:
-            conditional_print(f"DDGS search error during _search for '{query}': {type(e).__name__}: {e}", show_logs)
-            raise
+            conditional_print(f"DDGS search failed for '{query}': {type(e).__name__}: {e}. Falling back to SearxNG.", show_logs)
+            # Fallback to SearxNG
+            try:
+                searxng_url = "http://localhost:4000/search"
+                resp = requests.get(searxng_url, params={"q": query, "format": "json"}, timeout=120)
+                resp.raise_for_status()
+                searxng_data = resp.json()
+                results = []
+                for item in searxng_data.get("results", []):
+                    href = item.get("url") or item.get("href")
+                    if href:
+                        results.append({
+                            "title": item.get("title", ""),
+                            "href": href,
+                            "body": item.get("content", "") or item.get("description", "")
+                        })
+                        if len(results) >= max_results:
+                            break
+                conditional_print(f"SearxNG fallback successful for query '{query}'. Found {len(results)} results.", show_logs)
+                return results
+            except Exception as searx_e:
+                conditional_print(f"SearxNG fallback failed for '{query}': {type(searx_e).__name__}: {searx_e}", show_logs)
+                return []
 
     try:
         return retry_operation(_search, retries=retries, show_logs=show_logs)
-    except TimeoutException as e:
-        conditional_print(f"DDGS search timed out for query '{query}' after {retries} retries: {e}. Consider increasing DDGS_TIMEOUT environment variable.", show_logs)
-        return []
-    except RatelimitException as e:
-        conditional_print(f"DDGS rate limit exceeded for query '{query}' after retries: {e}. Consider adding longer delays between requests.", show_logs)
-        return []
-    except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code if e.response is not None else 'N/A'
-        if status_code in [403, 429]:
-             conditional_print(f"DDGS Received {status_code} for query '{query}'. Skipping after retries.", show_logs)
-        else:
-            conditional_print(f"DDGS HTTP error {status_code} for query '{query}'. Failed after retries.", show_logs)
-        return []
     except Exception as e:
-        conditional_print(f"DDGS Error performing text search for query '{query}' after retries: {type(e).__name__}: {e}.", show_logs)
+        conditional_print(f"All search attempts failed for query '{query}': {type(e).__name__}: {e}", show_logs)
         return []
 
 def search_and_synthesize(original_query, provided_website_urls, provided_youtube_urls, cleaned_query_text, show_sources=True, scrape_images=True, show_logs=True, output_format='markdown'):
